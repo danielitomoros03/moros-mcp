@@ -1,0 +1,53 @@
+{
+  "name": "tablero-mcp",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "MCP server that lets Claude read and update the tablero boards in Firestore",
+  "license": "MIT",
+  "author": "Daniel Moros",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/danielitomoros03/moros-mcp.git",
+    "directory": "tablero-mcp"
+  },
+  "homepage": "https://github.com/danielitomoros03/moros-mcp/tree/main/tablero-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/danielitomoros03/moros-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "claude",
+    "claude-code",
+    "kanban",
+    "firestore",
+    "firebase"
+  ],
+  "bin": {
+    "tablero-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "firebase emulators:exec --only firestore --project demo-tablero-mcp \"vitest run --no-file-parallelism\"",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "firebase-admin": "^14.5.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
