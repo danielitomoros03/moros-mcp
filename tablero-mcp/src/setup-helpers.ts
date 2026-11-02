@@ -31,6 +31,9 @@ export function resolveLauncher(scriptPath: string, platform: NodeJS.Platform): 
   return { command: 'node', args: [scriptPath] }
 }
 
+/** True when the client will start us through npx, which downloads the package the first time. */
+export const usesNpx = (launcher: Launcher) => launcher.command === 'npx' || (launcher.command === 'cmd' && launcher.args.includes('npx'))
+
 /** The sign-in lives in a file, so the client needs no keys or environment variables. */
 export function claudeCodeAddArgs(launcher: Launcher) {
   return ['mcp', 'add', SERVER_NAME, '--scope', 'user', '--', launcher.command, ...launcher.args]

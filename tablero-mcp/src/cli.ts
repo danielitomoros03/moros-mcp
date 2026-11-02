@@ -13,7 +13,7 @@ import {
 } from './session.js'
 import {
   browserCommand, claudeCodeAddArgs, claudeDesktopConfigPath, claudeMdSnippet, desktopEntry, explainError, mergeDesktopConfig,
-  resolveLauncher, SERVER_NAME,
+  resolveLauncher, SERVER_NAME, usesNpx,
 } from './setup-helpers.js'
 
 const HELP = `tablero-mcp: conecta Claude con tu tablero.
@@ -159,6 +159,19 @@ async function registerClaudeDesktop(path: string) {
   return true
 }
 
+/**
+ * The first start through npx downloads the package (Firebase included) and can take longer than the 30 seconds an MCP
+ * client waits, so the first session would show the server as failed. Doing that download now makes the first start fast.
+ */
+function warmUpLauncher() {
+  const { command, args } = launcher()
+  if (!usesNpx({ command, args })) return
+  console.log('  Preparando el primer arranque para que Claude lo encuentre listo (puede tardar un minuto)...')
+  const started = Date.now()
+  if (run(command, [...args, '--version'], 180000).ok) ok(`Listo en ${Math.round((Date.now() - started) / 1000)} s`)
+  else warn('No pude prepararlo. La primera vez Claude puede tardar en conectar; si falla, abre otra sesión.')
+}
+
 // ---------- commands ----------
 
 const listBoards = (session: Session) => createService({ db: session.db, uid: session.uid }).listBoards()
@@ -209,6 +222,7 @@ export async function runSetup(argv: string[]) {
         registered = (await registerClaudeDesktop(desktopPath)) || registered
       } else if (wanted === 'claude-desktop' && !desktopInstalled) warn('No encuentro Claude Desktop instalado.')
     }
+    if (registered) warmUpLauncher()
     if (!registered && wanted !== 'none') {
       const { command, args } = launcher()
       console.log('  Para cualquier otro cliente MCP, registra este comando (no necesita claves ni variables):')

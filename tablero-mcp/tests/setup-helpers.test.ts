@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   browserCommand, claudeCodeAddArgs, claudeDesktopConfigPath, claudeMdSnippet, credentialsPath, desktopEntry, explainError,
-  isValidEmail, mergeDesktopConfig, resolveLauncher,
+  isValidEmail, mergeDesktopConfig, resolveLauncher, usesNpx,
 } from '../src/setup-helpers.js'
 
 describe('rutas y validaciones', () => {
@@ -32,6 +32,11 @@ describe('registro en el cliente', () => {
       command: 'cmd', args: ['/c', 'npx', '-y', 'tablero-mcp'],
     })
     expect(resolveLauncher('/repo/tablero-mcp/dist/index.js', 'linux')).toEqual({ command: 'node', args: ['/repo/tablero-mcp/dist/index.js'] })
+  })
+  it('sabe cuándo el cliente arrancará el servidor con npx (para precalentar la descarga)', () => {
+    expect(usesNpx({ command: 'npx', args: ['-y', 'tablero-mcp'] })).toBe(true)
+    expect(usesNpx({ command: 'cmd', args: ['/c', 'npx', '-y', 'tablero-mcp'] })).toBe(true)
+    expect(usesNpx({ command: 'node', args: ['/repo/dist/index.js'] })).toBe(false)
   })
   it('registra en Claude Code sin claves ni variables de entorno', () => {
     expect(claudeCodeAddArgs({ command: 'npx', args: ['-y', 'tablero-mcp'] })).toEqual([

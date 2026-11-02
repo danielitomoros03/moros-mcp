@@ -129,6 +129,7 @@ variables de entorno al registrarlo y repite los pasos de la [puesta en marcha](
 | "Firestore rechazó el acceso" | Entra una vez en la web del tablero con esa cuenta para crear tu perfil. |
 | `Board ... not found or not accessible` | El tablero no existe, está archivado o tu cuenta no es miembro. Usa `list_boards` para ver los disponibles. |
 | `engine "node" is incompatible` | Necesitas Node 22 o superior. |
+| La primera vez Claude muestra el servidor como fallido (tiempo agotado) | `npx` descarga el paquete la primera vez y puede pasar de 30 segundos. Desde la versión 0.1.1 `setup` lo precalienta; si aun así ocurre, abre una sesión nueva: la segunda vez arranca en 5 a 7 segundos. |
 | No aparecen las herramientas | Abre una sesión nueva: las herramientas se cargan al iniciar. En Claude Code, `claude mcp get tablero` muestra el estado. |
 | Venías de la versión con llave de cuenta de servicio | Ya no se usa. Ejecuta `npx tablero-mcp setup`; ofrece reemplazar el registro anterior. Puedes borrar esa llave y su cuenta de servicio. |
 
