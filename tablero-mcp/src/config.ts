@@ -28,10 +28,10 @@ export const HOSTED_FIREBASE: FirebaseWebConfig = {
 
 // Google OAuth client of type "Desktop app" created in the project's Google Cloud console. Google documents that the
 // secret of an installed-app client is not confidential, so it can ship in the package. Fill these in after creating
-// the client (see "Puesta en marcha" in the README); until then `setup` explains what is missing.
+// the client (see docs/puesta-en-marcha.md); an empty value makes `setup` explain what is missing.
 export const HOSTED_OAUTH: OAuthClient = {
-  clientId: '',
-  clientSecret: '',
+  clientId: '673356955197-651od6rfhqojbaafskajtaj3cqj5np9e.apps.googleusercontent.com',
+  clientSecret: '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',
 }
 
 export const HOSTED_WEB_URL = 'https://tablero-moros.web.app'
