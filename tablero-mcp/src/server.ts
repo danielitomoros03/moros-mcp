@@ -148,7 +148,7 @@ export function createServer(service: Service) {
     'add_comment',
     {
       title: 'Add comment',
-      description: 'Add a comment to a card, for example what was done and in which commit. It is shown as written by Claude.',
+      description: 'Add a comment to a card, for example what was done and in which commit. It appears under the user name, and the card history marks it as done via Claude.',
       inputSchema: { boardId, cardId, text: z.string().describe('Comment text, up to 2000 characters') },
       annotations: write,
     },

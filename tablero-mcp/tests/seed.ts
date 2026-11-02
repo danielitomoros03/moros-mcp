@@ -1,5 +1,9 @@
 import { getApps, initializeApp } from 'firebase-admin/app'
+import { getAuth } from 'firebase-admin/auth'
 import { getFirestore, Timestamp, type Firestore } from 'firebase-admin/firestore'
+import { signInWithCustomToken } from 'firebase/auth'
+import type { Config } from '../src/config.js'
+import { openSession, type Session } from '../src/session.js'
 
 // Without this the Google auth library waits on a metadata server that does not exist on a dev machine.
 process.env.METADATA_SERVER_DETECTION ??= 'none'
@@ -9,6 +13,28 @@ export const PROJECT = 'demo-tablero-mcp'
 export function testDb(): Firestore {
   const app = getApps()[0] ?? initializeApp({ projectId: PROJECT })
   return getFirestore(app)
+}
+
+export const testConfig: Config = {
+  firebase: { apiKey: 'fake-key', authDomain: 'localhost', projectId: PROJECT, appId: 'fake-app' },
+  oauth: { clientId: 'fake-client', clientSecret: 'fake-secret' },
+  webUrl: 'http://localhost',
+}
+
+const USERS: [string, string][] = [['me', 'Daniel'], ['ana', 'Ana'], ['other', 'Otra persona'], ['nobody', 'Nadie']]
+
+/** Auth accounts with fixed uids, so the seeded boards point at people who can really sign in. */
+export async function ensureAuthUsers() {
+  for (const [uid, name] of USERS) {
+    await getAuth(getApps()[0]).createUser({ uid, email: `${uid}@example.com`, emailVerified: true, displayName: name }).catch(() => undefined)
+  }
+}
+
+/** A real client session (what the MCP server uses) signed in as one of the seeded people; the rules apply to it. */
+export async function signInAs(uid: string): Promise<Session> {
+  testDb()
+  const token = await getAuth(getApps()[0]).createCustomToken(uid)
+  return openSession(testConfig, (auth) => signInWithCustomToken(auth, token))
 }
 
 export async function clearAll() {
@@ -45,7 +71,7 @@ function card(overrides: Record<string, unknown>) {
 // me = the configured user; ana = another member; other = someone with their own board.
 export async function seed(db: Firestore) {
   const now = Timestamp.now()
-  for (const [uid, name] of [['me', 'Daniel'], ['ana', 'Ana'], ['other', 'Otra persona']]) {
+  for (const [uid, name] of USERS.slice(0, 3)) {
     await db.collection('users').doc(uid).set({ displayName: name, email: `${uid}@example.com`, photoURL: null, createdAt: now })
   }
   const board = (extra: Record<string, unknown>) => ({
@@ -83,25 +109,4 @@ export async function seed(db: Firestore) {
   await cards.doc('D').set(card({ title: 'Elegir stack', columnId: 'c3' }))
   await cards.doc('E').set(card({ title: 'Vieja', archived: true }))
   await db.collection('boards').doc('b4').collection('cards').doc('V').set(card({ title: 'Tarjeta de lectura' }))
-}
-
-// What the Firestore rules of the web app accept for a card, so cards written here stay editable there.
-export function expectClientValidCard(data: FirebaseFirestore.DocumentData) {
-  const allowed = ['title', 'description', 'columnId', 'position', 'assigneeId', 'labelIds', 'dueDate', 'priority', 'archived', 'commentCount', 'createdBy', 'createdAt', 'updatedAt']
-  const required = ['title', 'columnId', 'position', 'priority', 'archived', 'createdBy', 'createdAt', 'updatedAt']
-  const problems: string[] = []
-  for (const key of Object.keys(data)) if (!allowed.includes(key)) problems.push(`unexpected field ${key}`)
-  for (const key of required) if (!(key in data)) problems.push(`missing ${key}`)
-  if (typeof data.title !== 'string' || data.title.length < 1 || data.title.length > 200) problems.push('title')
-  if (typeof (data.description ?? '') !== 'string' || (data.description ?? '').length > 5000) problems.push('description')
-  if (typeof data.columnId !== 'string') problems.push('columnId')
-  if (typeof data.position !== 'number') problems.push('position')
-  if (!['none', 'low', 'medium', 'high', 'urgent'].includes(data.priority)) problems.push('priority')
-  if (!Array.isArray(data.labelIds ?? []) || (data.labelIds ?? []).length > 10) problems.push('labelIds')
-  if (data.assigneeId != null && typeof data.assigneeId !== 'string') problems.push('assigneeId')
-  if (data.dueDate != null && !(data.dueDate instanceof Timestamp)) problems.push('dueDate')
-  if (typeof data.archived !== 'boolean') problems.push('archived')
-  if (!Number.isInteger(data.commentCount ?? 0)) problems.push('commentCount')
-  if (!(data.createdAt instanceof Timestamp) || !(data.updatedAt instanceof Timestamp)) problems.push('timestamps')
-  return problems
 }

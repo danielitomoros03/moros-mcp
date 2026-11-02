@@ -3,10 +3,12 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { createServer } from '../src/server.js'
 import { createService } from '../src/service.js'
-import { clearAll, seed, testDb } from './seed.js'
+import type { Session } from '../src/session.js'
+import { clearAll, ensureAuthUsers, seed, signInAs, testDb } from './seed.js'
 
 const db = testDb()
 let client: Client
+let session: Session
 
 const call = async (name: string, args: Record<string, unknown> = {}) => {
   const result = await client.callTool({ name, arguments: args })
@@ -15,14 +17,17 @@ const call = async (name: string, args: Record<string, unknown> = {}) => {
 }
 
 beforeAll(async () => {
+  await ensureAuthUsers()
+  session = await signInAs('me')
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
-  await createServer(createService({ db, userEmail: 'me@example.com' })).connect(serverSide)
+  await createServer(createService({ db: session.db, uid: session.uid })).connect(serverSide)
   client = new Client({ name: 'test', version: '1.0.0' })
   await client.connect(clientSide)
 })
 
 afterAll(async () => {
   await client.close()
+  await session.close()
 })
 
 beforeEach(async () => {

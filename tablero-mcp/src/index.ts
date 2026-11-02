@@ -1,31 +1,27 @@
 #!/usr/bin/env node
-import { applicationDefault, initializeApp } from 'firebase-admin/app'
-import { getFirestore } from 'firebase-admin/firestore'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import { createServer } from './server.js'
-import { createService } from './service.js'
+
+// With arguments (`setup`, `doctor`, ...) this is a command-line tool for humans; without, an MCP client started it.
+const args = process.argv.slice(2)
+if (args.length > 0) {
+  const { runCli } = await import('./cli.js')
+  process.exit(await runCli(args))
+}
+
+const { loadConfig } = await import('./config.js')
+const { connectFromStoredLogin, NotSignedIn } = await import('./session.js')
+const { explainError } = await import('./setup-helpers.js')
+const { createServer } = await import('./server.js')
+const { createService } = await import('./service.js')
 
 // stdout belongs to the MCP protocol, so anything for humans goes to stderr.
-const userEmail = process.env.TABLERO_USER_EMAIL
-if (!userEmail) {
-  console.error('Falta TABLERO_USER_EMAIL: el correo de la cuenta cuyos tableros puede usar Claude.')
+let session: Awaited<ReturnType<typeof connectFromStoredLogin>>
+try {
+  session = await connectFromStoredLogin(loadConfig())
+} catch (error) {
+  console.error(error instanceof NotSignedIn ? error.message : `No se pudo iniciar tablero-mcp: ${explainError(error)}`)
   process.exit(1)
 }
 
-const usingEmulator = Boolean(process.env.FIRESTORE_EMULATOR_HOST)
-if (!usingEmulator && !process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-  console.error('Falta GOOGLE_APPLICATION_CREDENTIALS: la ruta al JSON de la cuenta de servicio.')
-  process.exit(1)
-}
-
-// With a service account key the project id is read from the key; TABLERO_PROJECT_ID only overrides it.
-const explicitProject = process.env.TABLERO_PROJECT_ID
-const app = initializeApp(
-  usingEmulator
-    ? { projectId: explicitProject ?? 'demo-tablero' }
-    : { credential: applicationDefault(), ...(explicitProject ? { projectId: explicitProject } : {}) },
-)
-
-const service = createService({ db: getFirestore(app), userEmail, actor: process.env.TABLERO_ACTOR ?? 'claude' })
-await createServer(service).connect(new StdioServerTransport())
-console.error(`tablero-mcp listo (proyecto: ${app.options.projectId ?? 'el de la llave'}, usuario ${userEmail}${usingEmulator ? ', emulador' : ''})`)
+await createServer(createService({ db: session.db, uid: session.uid })).connect(new StdioServerTransport())
+console.error(`tablero-mcp listo (sesión de ${session.email}, proyecto ${session.projectId})`)

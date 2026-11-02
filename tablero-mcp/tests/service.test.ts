@@ -1,9 +1,25 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { addDoc, collection, doc, getDoc, getDocs, setDoc, serverTimestamp } from 'firebase/firestore'
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { createService, ToolError } from '../src/service.js'
-import { clearAll, expectClientValidCard, seed, testDb } from './seed.js'
+import type { Session } from '../src/session.js'
+import { clearAll, ensureAuthUsers, seed, signInAs, testDb } from './seed.js'
 
+// `db` (admin) seeds and inspects the data; the service under test runs as a signed-in person, so the real rules apply.
 const db = testDb()
-const service = () => createService({ db, userEmail: 'Me@Example.com' })
+let me: Session
+let nobody: Session
+const service = () => createService({ db: me.db, uid: me.uid })
+
+beforeAll(async () => {
+  await ensureAuthUsers()
+  me = await signInAs('me')
+  nobody = await signInAs('nobody')
+})
+
+afterAll(async () => {
+  await me.close()
+  await nobody.close()
+})
 
 beforeEach(async () => {
   await clearAll()
@@ -23,9 +39,19 @@ describe('acceso', () => {
     await expect(service().listCards({ boardId: 'b3' })).rejects.toThrow(ToolError)
   })
 
-  it('falla con un mensaje útil si el correo no tiene perfil', async () => {
-    const stranger = createService({ db, userEmail: 'nadie@example.com' })
-    await expect(stranger.listBoards()).rejects.toThrow(/Sign in once/)
+  it('quien no es miembro de nada ve una lista vacía y los tableros de otros no existen para él', async () => {
+    const stranger = createService({ db: nobody.db, uid: nobody.uid })
+    expect(await stranger.listBoards()).toEqual([])
+    await expect(stranger.getBoard({ boardId: 'b1' })).rejects.toThrow(/not found or not accessible/)
+    await expect(stranger.createCard({ boardId: 'b1', title: 'Intruso' })).rejects.toThrow(/not found or not accessible/)
+  })
+
+  it('las reglas de Firestore bloquean lo ajeno aunque se salten las validaciones del servicio', async () => {
+    await expect(getDoc(doc(me.db, 'boards/b2'))).rejects.toMatchObject({ code: 'permission-denied' })
+    await expect(getDocs(collection(me.db, 'boards/b2/cards'))).rejects.toMatchObject({ code: 'permission-denied' })
+    const card = { title: 'x', columnId: 'c1', position: 1, priority: 'none', archived: false, createdBy: 'me', createdAt: serverTimestamp(), updatedAt: serverTimestamp() }
+    await expect(addDoc(collection(me.db, 'boards/b4/cards'), card)).rejects.toMatchObject({ code: 'permission-denied' }) // solo lectura
+    await expect(setDoc(doc(me.db, 'boards/b1/cards/falsa'), { ...card, createdBy: 'ana' })).rejects.toMatchObject({ code: 'permission-denied' }) // firma ajena
   })
 
   it('un lector no puede escribir, pero sí leer', async () => {
@@ -67,8 +93,8 @@ describe('lectura', () => {
     const s = service()
     await s.addComment({ boardId: 'b1', cardId: 'A', text: 'Hecho en el commit abc123' })
     const card = await s.getCard({ boardId: 'b1', cardId: 'A' })
-    expect(card.comments).toEqual([expect.objectContaining({ author: 'Claude', text: 'Hecho en el commit abc123' })])
-    expect(card.history[0]).toMatchObject({ type: 'comment_added', by: 'Claude' })
+    expect(card.comments).toEqual([expect.objectContaining({ author: 'Daniel', text: 'Hecho en el commit abc123' })])
+    expect(card.history[0]).toMatchObject({ type: 'comment_added', by: 'Daniel', via: 'claude' })
     await expect(s.getCard({ boardId: 'b1', cardId: 'E' })).rejects.toThrow(/not found/)
   })
 })
@@ -87,10 +113,9 @@ describe('escritura', () => {
     expect(created).toMatchObject({ title: 'Conectar con Claude', column: { kind: 'todo' }, priority: 'high', labels: ['backend'], dueDate: '2026-11-12', assignee: { name: 'Ana' } })
     const stored = (await db.doc(`boards/b1/cards/${created.id}`).get()).data()!
     expect(stored.position).toBe(3072)
-    expect(stored.createdBy).toBe('claude')
-    expect(expectClientValidCard(stored)).toEqual([])
+    expect(stored.createdBy).toBe('me')
     const log = await db.collection('boards/b1/activity').where('cardId', '==', created.id).get()
-    expect(log.docs[0].data()).toMatchObject({ type: 'card_created', actorId: 'claude', data: { columnName: 'Por hacer' } })
+    expect(log.docs[0].data()).toMatchObject({ type: 'card_created', actorId: 'me', data: { columnName: 'Por hacer', via: 'claude' } })
   })
 
   it('createCard valida entradas', async () => {
@@ -111,7 +136,6 @@ describe('escritura', () => {
     expect(result.card).toMatchObject({ title: 'Boceto v2', priority: 'urgent', dueDate: '2026-12-01', labels: ['diseño'], assignee: { name: 'Daniel' } })
     const log = await db.collection('boards/b1/activity').where('cardId', '==', 'B').get()
     expect(log.docs.map((d) => d.data().data.field).sort()).toEqual(['assigneeId', 'dueDate', 'labelIds', 'priority', 'title'])
-    expect(expectClientValidCard((await db.doc('boards/b1/cards/B').get()).data()!)).toEqual([])
 
     const again = await s.updateCard({ boardId: 'b1', cardId: 'B', priority: 'urgent' })
     expect(again.changed).toBe(false)
@@ -128,7 +152,7 @@ describe('escritura', () => {
     expect(moved.column).toMatchObject({ id: 'c2', kind: 'doing' })
     expect((await db.doc('boards/b1/cards/A').get()).data()!.position).toBe(2048)
     const log = await db.collection('boards/b1/activity').where('cardId', '==', 'A').get()
-    expect(log.docs[0].data()).toMatchObject({ type: 'card_moved', actorId: 'claude', data: { fromName: 'Por hacer', toName: 'En curso' } })
+    expect(log.docs[0].data()).toMatchObject({ type: 'card_moved', actorId: 'me', data: { fromName: 'Por hacer', toName: 'En curso', via: 'claude' } })
   })
 
   it('moveCard por columnId, al inicio, y reordenar en la misma columna no deja historial', async () => {
@@ -140,16 +164,15 @@ describe('escritura', () => {
     await expect(s.moveCard({ boardId: 'b1', cardId: 'B' })).rejects.toThrow(/columnId or kind/)
   })
 
-  it('addComment suma al contador y deja la tarjeta válida para el cliente', async () => {
+  it('addComment suma al contador y firma con la cuenta del usuario', async () => {
     const s = service()
     await s.addComment({ boardId: 'b1', cardId: 'C', text: 'Primero' })
     const result = await s.addComment({ boardId: 'b1', cardId: 'C', text: 'Segundo' })
     expect(result.commentCount).toBe(2)
     const stored = (await db.doc('boards/b1/cards/C').get()).data()!
     expect(stored.commentCount).toBe(2)
-    expect(expectClientValidCard(stored)).toEqual([])
     const comments = await db.collection('boards/b1/cards/C/comments').get()
-    expect(comments.docs.every((d) => d.data().authorId === 'claude' && d.data().editedAt === null)).toBe(true)
+    expect(comments.docs.every((d) => d.data().authorId === 'me' && d.data().editedAt === null)).toBe(true)
     await expect(s.addComment({ boardId: 'b1', cardId: 'C', text: '' })).rejects.toThrow(/text/)
   })
 
@@ -165,12 +188,5 @@ describe('escritura', () => {
     await db.doc('boards/b1/cards/B').update({ assigneeId: 'gone' })
     await service().updateCard({ boardId: 'b1', cardId: 'B', title: 'Sigue editable' })
     expect((await db.doc('boards/b1/cards/B').get()).data()!.assigneeId).toBeNull()
-  })
-
-  it('usa el actor configurado en historial y comentarios', async () => {
-    const custom = createService({ db, userEmail: 'me@example.com', actor: 'asistente' })
-    await custom.addComment({ boardId: 'b1', cardId: 'A', text: 'hola' })
-    const log = await db.collection('boards/b1/activity').where('cardId', '==', 'A').get()
-    expect(log.docs[0].data().actorId).toBe('asistente')
   })
 })

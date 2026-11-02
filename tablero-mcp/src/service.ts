@@ -1,4 +1,7 @@
-import { FieldValue, Timestamp, type DocumentData, type Firestore, type WriteBatch } from 'firebase-admin/firestore'
+import {
+  collection, doc, getDoc, getDocs, increment, limit, orderBy, query, serverTimestamp, Timestamp, where, writeBatch,
+  type DocumentData, type DocumentReference, type Firestore, type WriteBatch,
+} from 'firebase/firestore'
 import { positionAtEnd, positionBetween } from './ordering.js'
 
 // Thrown for problems the caller can fix (bad input, no access); shown to Claude as the tool result.
@@ -60,13 +63,13 @@ interface Profile {
   email: string
 }
 
-// Same limits the Firestore rules enforce for the web app; the Admin SDK skips the rules, so they are checked here.
+// Same limits the Firestore rules enforce. The rules are the real guard; checking here gives Claude a readable error first.
 const LIMITS = { title: 200, description: 5000, comment: 2000, labelsPerCard: 10 }
 
 export interface ServiceOptions {
   db: Firestore
-  userEmail: string
-  actor?: string
+  /** The signed-in user. Everything Claude writes is attributed to this uid, because that is what the rules require. */
+  uid: string
 }
 
 export type Service = ReturnType<typeof createService>
@@ -117,67 +120,66 @@ function toBoard(id: string, data: DocumentData): BoardDoc {
   }
 }
 
-export function createService({ db, userEmail, actor = 'claude' }: ServiceOptions) {
-  let uidPromise: Promise<string> | undefined
+// Marks what Claude did in the history; the rules do not allow extra fields on comments or cards, but `data` is free-form.
+const VIA = { via: 'claude' }
+
+const isDenied = (error: unknown) => (error as { code?: string })?.code === 'permission-denied'
+
+export function createService({ db, uid: me }: ServiceOptions) {
   const profileCache = new Map<string, Profile | null>()
 
-  const boardRef = (boardId: string) => db.collection('boards').doc(boardId)
-  const cardRef = (boardId: string, cardId: string) => boardRef(boardId).collection('cards').doc(cardId)
+  const boardRef = (boardId: string) => doc(db, 'boards', boardId)
+  const cardRef = (boardId: string, cardId: string) => doc(db, 'boards', boardId, 'cards', cardId)
+  const cardsOf = (boardId: string) => collection(db, 'boards', boardId, 'cards')
 
-  async function findUid() {
-    const snapshot = await db.collection('users').where('email', '==', userEmail.trim().toLowerCase()).limit(1).get()
-    if (snapshot.empty) {
-      throw new ToolError(
-        `No profile found for ${userEmail}. Sign in once at the tablero web app with that email, then try again.`,
-      )
+  // For a board that is not yours the rules answer "denied" instead of "missing"; to the caller both mean "not there".
+  async function readDoc(ref: DocumentReference) {
+    try {
+      return await getDoc(ref)
+    } catch (error) {
+      if (isDenied(error)) return undefined
+      throw error
     }
-    return snapshot.docs[0].id
   }
-  const getUid = () => (uidPromise ??= findUid().catch((error) => {
-    uidPromise = undefined
-    throw error
-  }))
 
   async function profile(uid: string): Promise<Profile | null> {
     if (!profileCache.has(uid)) {
-      const snap = await db.collection('users').doc(uid).get()
-      const data = snap.data()
+      const snap = await readDoc(doc(db, 'users', uid))
+      const data = snap?.data()
       profileCache.set(uid, data ? { uid, displayName: data.displayName ?? '', email: data.email ?? '' } : null)
     }
     return profileCache.get(uid) ?? null
   }
 
   async function nameOf(uid: string) {
-    if (uid === actor) return 'Claude'
     const found = await profile(uid)
     return found?.displayName || found?.email || 'Unknown user'
   }
 
   // Boards where the configured user is a member. Anything else looks like it does not exist.
   async function loadBoard(boardId: string, access: 'read' | 'write'): Promise<BoardDoc> {
-    const uid = await getUid()
-    const snap = await boardRef(boardId).get()
-    const data = snap.data()
-    if (!snap.exists || !data || data.archived || !data.members?.[uid]) {
+    const snap = await readDoc(boardRef(boardId))
+    const data = snap?.data()
+    if (!snap || !snap.exists() || !data || data.archived || !data.members?.[me]) {
       throw new ToolError(`Board ${boardId} not found or not accessible. Use list_boards to see the available boards.`)
     }
-    if (access === 'write' && data.members[uid] === 'viewer') {
+    if (access === 'write' && data.members[me] === 'viewer') {
       throw new ToolError(`You only have read access to board "${data.name}".`)
     }
     return toBoard(snap.id, data)
   }
 
   async function loadCard(boardId: string, cardId: string): Promise<CardDoc> {
-    const snap = await cardRef(boardId, cardId).get()
-    const data = snap.data()
-    if (!snap.exists || !data || data.archived) {
+    const snap = await readDoc(cardRef(boardId, cardId))
+    const data = snap?.data()
+    if (!snap || !snap.exists() || !data || data.archived) {
       throw new ToolError(`Card ${cardId} not found in board ${boardId}. Use list_cards to see the available cards.`)
     }
     return toCard(snap.id, data)
   }
 
   async function activeCards(boardId: string): Promise<CardDoc[]> {
-    const snapshot = await boardRef(boardId).collection('cards').where('archived', '==', false).get()
+    const snapshot = await getDocs(query(cardsOf(boardId), where('archived', '==', false)))
     return snapshot.docs.map((doc) => toCard(doc.id, doc.data()))
   }
 
@@ -224,13 +226,13 @@ export function createService({ db, userEmail, actor = 'claude' }: ServiceOption
     card.assigneeId && !board.members[card.assigneeId] ? { assigneeId: null } : {}
 
   function addActivity(batch: WriteBatch, boardId: string, card: { id: string; title: string }, draft: ActivityDraft) {
-    batch.set(boardRef(boardId).collection('activity').doc(), {
+    batch.set(doc(collection(db, 'boards', boardId, 'activity')), {
       type: draft.type,
       cardId: card.id,
       cardTitle: card.title,
-      actorId: actor,
-      at: FieldValue.serverTimestamp(),
-      data: draft.data,
+      actorId: me,
+      at: serverTimestamp(),
+      data: { ...draft.data, ...VIA },
     })
   }
 
@@ -252,12 +254,9 @@ export function createService({ db, userEmail, actor = 'claude' }: ServiceOption
 
   return {
     async listBoards() {
-      const uid = await getUid()
-      const snapshot = await db
-        .collection('boards')
-        .where('memberIds', 'array-contains', uid)
-        .orderBy('updatedAt', 'desc')
-        .get()
+      const snapshot = await getDocs(
+        query(collection(db, 'boards'), where('memberIds', 'array-contains', me), orderBy('updatedAt', 'desc')),
+      )
       return snapshot.docs
         .filter((doc) => !doc.data().archived)
         .map((doc) => {
@@ -266,7 +265,7 @@ export function createService({ db, userEmail, actor = 'claude' }: ServiceOption
             id: board.id,
             name: board.name,
             description: board.description,
-            yourRole: board.members[uid],
+            yourRole: board.members[me],
             columns: board.columns,
             labels: board.labels.map((label) => label.name),
           }
@@ -327,33 +326,33 @@ export function createService({ db, userEmail, actor = 'claude' }: ServiceOption
     async getCard(input: { boardId: string; cardId: string }) {
       const board = await loadBoard(input.boardId, 'read')
       const card = await loadCard(board.id, input.cardId)
-      const commentsSnap = await cardRef(board.id, card.id).collection('comments').orderBy('createdAt', 'asc').get()
-      const activitySnap = await boardRef(board.id)
-        .collection('activity')
-        .where('cardId', '==', card.id)
-        .orderBy('at', 'desc')
-        .limit(30)
-        .get()
+      const commentsSnap = await getDocs(
+        query(collection(db, 'boards', board.id, 'cards', card.id, 'comments'), orderBy('createdAt', 'asc')),
+      )
+      const activitySnap = await getDocs(
+        query(collection(db, 'boards', board.id, 'activity'), where('cardId', '==', card.id), orderBy('at', 'desc'), limit(30)),
+      )
       return {
         ...(await describeCard(board, card)),
         description: card.description,
         createdBy: await nameOf(card.createdBy),
         createdAt: iso(card.createdAt),
         comments: await Promise.all(
-          commentsSnap.docs.map(async (doc) => ({
-            id: doc.id,
-            author: await nameOf(doc.data().authorId),
-            text: doc.data().text,
-            createdAt: iso(doc.data().createdAt),
-            edited: Boolean(doc.data().editedAt),
+          commentsSnap.docs.map(async (comment) => ({
+            id: comment.id,
+            author: await nameOf(comment.data().authorId),
+            text: comment.data().text,
+            createdAt: iso(comment.data().createdAt),
+            edited: Boolean(comment.data().editedAt),
           })),
         ),
         history: await Promise.all(
-          activitySnap.docs.map(async (doc) => ({
-            type: doc.data().type,
-            by: await nameOf(doc.data().actorId),
-            at: iso(doc.data().at),
-            data: doc.data().data ?? {},
+          activitySnap.docs.map(async (entry) => ({
+            type: entry.data().type,
+            by: await nameOf(entry.data().actorId),
+            via: entry.data().data?.via ?? null,
+            at: iso(entry.data().at),
+            data: entry.data().data ?? {},
           })),
         ),
       }
@@ -383,8 +382,8 @@ export function createService({ db, userEmail, actor = 'claude' }: ServiceOption
       const dueDate = input.dueDate ? parseDate(input.dueDate) : null
       const siblings = (await activeCards(board.id)).filter((card) => card.columnId === column.id)
 
-      const ref = boardRef(board.id).collection('cards').doc()
-      const batch = db.batch()
+      const ref = doc(cardsOf(board.id))
+      const batch = writeBatch(db)
       batch.set(ref, {
         title,
         description,
@@ -396,9 +395,9 @@ export function createService({ db, userEmail, actor = 'claude' }: ServiceOption
         priority: input.priority ?? 'none',
         archived: false,
         commentCount: 0,
-        createdBy: actor,
-        createdAt: FieldValue.serverTimestamp(),
-        updatedAt: FieldValue.serverTimestamp(),
+        createdBy: me,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
       })
       addActivity(batch, board.id, { id: ref.id, title }, {
         type: 'card_created',
@@ -466,11 +465,11 @@ export function createService({ db, userEmail, actor = 'claude' }: ServiceOption
       if (drafts.length === 0) return { changed: false, card: await describeCard(board, card) }
 
       const title = (patch.title as string | undefined) ?? card.title
-      const batch = db.batch()
+      const batch = writeBatch(db)
       batch.update(cardRef(board.id, card.id), {
         ...assigneeFix(board, card),
         ...patch,
-        updatedAt: FieldValue.serverTimestamp(),
+        updatedAt: serverTimestamp(),
       })
       for (const draft of drafts) addActivity(batch, board.id, { id: card.id, title }, draft)
       await batch.commit()
@@ -488,12 +487,12 @@ export function createService({ db, userEmail, actor = 'claude' }: ServiceOption
       const position =
         input.position === 'start' ? positionBetween(undefined, siblings.length ? Math.min(...siblings) : undefined)! : positionAtEnd(siblings)
 
-      const batch = db.batch()
+      const batch = writeBatch(db)
       batch.update(cardRef(board.id, card.id), {
         ...assigneeFix(board, card),
         columnId: column.id,
         position,
-        updatedAt: FieldValue.serverTimestamp(),
+        updatedAt: serverTimestamp(),
       })
       if (column.id !== card.columnId) {
         const from = board.columns.find((item) => item.id === card.columnId)
@@ -511,13 +510,13 @@ export function createService({ db, userEmail, actor = 'claude' }: ServiceOption
       const card = await loadCard(board.id, input.cardId)
       const text = input.text.trim()
       if (!text || text.length > LIMITS.comment) throw new ToolError(`text must have 1 to ${LIMITS.comment} characters.`)
-      const ref = cardRef(board.id, card.id).collection('comments').doc()
-      const batch = db.batch()
-      batch.set(ref, { authorId: actor, text, createdAt: FieldValue.serverTimestamp(), editedAt: null })
+      const ref = doc(collection(db, 'boards', board.id, 'cards', card.id, 'comments'))
+      const batch = writeBatch(db)
+      batch.set(ref, { authorId: me, text, createdAt: serverTimestamp(), editedAt: null })
       batch.update(cardRef(board.id, card.id), {
         ...assigneeFix(board, card),
-        commentCount: FieldValue.increment(1),
-        updatedAt: FieldValue.serverTimestamp(),
+        commentCount: increment(1),
+        updatedAt: serverTimestamp(),
       })
       addActivity(batch, board.id, card, { type: 'comment_added', data: {} })
       await batch.commit()
@@ -527,11 +526,11 @@ export function createService({ db, userEmail, actor = 'claude' }: ServiceOption
     async archiveCard(input: { boardId: string; cardId: string }) {
       const board = await loadBoard(input.boardId, 'write')
       const card = await loadCard(board.id, input.cardId)
-      const batch = db.batch()
+      const batch = writeBatch(db)
       batch.update(cardRef(board.id, card.id), {
         ...assigneeFix(board, card),
         archived: true,
-        updatedAt: FieldValue.serverTimestamp(),
+        updatedAt: serverTimestamp(),
       })
       addActivity(batch, board.id, card, { type: 'card_archived', data: {} })
       await batch.commit()

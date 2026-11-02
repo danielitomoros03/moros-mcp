@@ -1,0 +1,111 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+    function text(v, min, max) {
+      return v is string && v.size() >= min && v.size() <= max;
+    }
+
+    // Perfiles: cualquiera con sesión los lee; cada quien escribe solo el suyo.
+    match /users/{uid} {
+      allow read: if signedIn();
+      allow create, update: if signedIn() && request.auth.uid == uid
+        && request.auth.token.email_verified == true
+        && request.resource.data.keys().hasOnly(['displayName', 'email', 'photoURL', 'createdAt'])
+        && request.resource.data.email == request.auth.token.email.lower();
+      allow delete: if false;
+    }
+
+    function validBoard(d) {
+      return d.keys().hasOnly(['name', 'description', 'ownerId', 'members', 'memberIds',
+                               'columns', 'labels', 'archived', 'createdAt', 'updatedAt'])
+        && text(d.name, 1, 80)
+        && d.columns is list && d.columns.size() <= 12
+        && d.labels is list && d.labels.size() <= 30
+        && d.archived is bool
+        && d.updatedAt == request.time
+        && d.members.values().hasOnly(['owner', 'editor', 'viewer'])
+        && d.members[d.ownerId] == 'owner'
+        && d.memberIds.toSet() == d.members.keys().toSet();
+    }
+
+    match /boards/{boardId} {
+
+      // Rol de quien consulta; se lee del documento del tablero.
+      function role() {
+        return get(/databases/$(database)/documents/boards/$(boardId)).data.members.get(request.auth.uid, 'none');
+      }
+      function isMember() { return signedIn() && role() in ['owner', 'editor', 'viewer']; }
+      function canEdit()  { return signedIn() && role() in ['owner', 'editor']; }
+      function isOwner()  { return signedIn() && role() == 'owner'; }
+
+      // Tablero: lo leen sus miembros; solo el owner lo configura.
+      allow read: if signedIn() && request.auth.uid in resource.data.memberIds;
+      allow create: if signedIn() && validBoard(request.resource.data)
+        && request.resource.data.ownerId == request.auth.uid
+        && request.resource.data.memberIds == [request.auth.uid]
+        && request.resource.data.createdAt == request.time;
+      allow update: if signedIn() && resource.data.members[request.auth.uid] == 'owner'
+        && validBoard(request.resource.data)
+        && request.resource.data.ownerId == resource.data.ownerId
+        && request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if signedIn() && resource.data.members[request.auth.uid] == 'owner';
+
+      function validCard(d) {
+        return d.keys().hasAll(['title', 'columnId', 'position', 'priority', 'archived', 'createdBy', 'createdAt', 'updatedAt'])
+          && d.keys().hasOnly(['title', 'description', 'columnId', 'position', 'assigneeId', 'labelIds',
+                               'dueDate', 'priority', 'archived', 'commentCount',
+                               'createdBy', 'createdAt', 'updatedAt'])
+          && text(d.title, 1, 200)
+          && d.get('description', '') is string && d.get('description', '').size() <= 5000
+          && d.columnId is string
+          && d.position is number
+          && d.priority in ['none', 'low', 'medium', 'high', 'urgent']
+          && d.get('labelIds', []) is list && d.get('labelIds', []).size() <= 10
+          && (d.get('assigneeId', null) == null
+              || get(/databases/$(database)/documents/boards/$(boardId)).data.members.get(d.assigneeId, null) != null)
+          && (d.get('dueDate', null) == null || d.dueDate is timestamp)
+          && d.archived is bool
+          && d.get('commentCount', 0) is int
+          && d.updatedAt == request.time;
+      }
+
+      match /cards/{cardId} {
+        allow read: if isMember();
+        allow create: if canEdit() && validCard(request.resource.data)
+          && request.resource.data.createdBy == request.auth.uid
+          && request.resource.data.createdAt == request.time;
+        allow update: if canEdit() && validCard(request.resource.data)
+          && request.resource.data.createdBy == resource.data.createdBy
+          && request.resource.data.createdAt == resource.data.createdAt;
+        allow delete: if canEdit();
+
+        match /comments/{commentId} {
+          allow read: if isMember();
+          allow create: if canEdit()
+            && request.resource.data.keys().hasOnly(['authorId', 'text', 'createdAt', 'editedAt'])
+            && request.resource.data.authorId == request.auth.uid
+            && text(request.resource.data.text, 1, 2000)
+            && request.resource.data.createdAt == request.time;
+          allow update: if canEdit() && resource.data.authorId == request.auth.uid
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['text', 'editedAt'])
+            && text(request.resource.data.text, 1, 2000);
+          allow delete: if signedIn() && (resource.data.authorId == request.auth.uid || isOwner());
+        }
+      }
+
+      match /activity/{activityId} {
+        allow read: if isMember();
+        allow create: if canEdit()
+          && request.resource.data.keys().hasOnly(['type', 'cardId', 'cardTitle', 'actorId', 'at', 'data'])
+          && request.resource.data.actorId == request.auth.uid
+          && request.resource.data.at == request.time
+          && request.resource.data.type in ['card_created', 'card_moved', 'card_updated', 'card_archived', 'comment_added'];
+        allow update, delete: if false;
+      }
+    }
+  }
+}
